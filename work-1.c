@@ -3,12 +3,14 @@
 #include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/init.h>
+#include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/kref.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
+#include <linux/timer.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
 
@@ -36,6 +38,23 @@ static int wq_type = 0;
 
 module_param(wq_type, int, 0644);
 MODULE_PARM_DESC(wq_type, "create work queue type for test purpose");
+
+static void work_func(struct work_struct *work);
+
+static void mytimer_handler(unsigned long data);
+static unsigned long half_sec;
+
+DEFINE_TIMER(mytimer, mytimer_handler, 0, 0);
+
+static void mytimer_handler(unsigned long data)
+{
+	pr_err("%s: init_work()\n", __func__);
+	INIT_WORK(&tw->w, work_func);
+	pr_err("%s: Add test_work to the tw's workqueue\n", __func__);
+	queue_work(tw->wq, &tw->w);
+
+	mod_timer(&mytimer, jiffies + half_sec);
+}
 
 /********** debugfs **********/
 static struct dentry *dent;
@@ -88,14 +107,8 @@ static int start_show(struct seq_file *s, void *unused)
 
 	pr_info("%s: called\n", __func__);
 
-	/* Let's put the queue_work here for test */
-	for (i = 0; i < 10; i++) {
-		pr_err("%s: Add test_work to the tw's workqueue\n", __func__);
-		queue_work(tw->wq, &tw->w);
-		msleep(10);
-	}
-
-	pr_info("%s: done ---->\n", __func__);
+	half_sec = msecs_to_jiffies(500 * 1);
+	mod_timer(&mytimer, jiffies + half_sec);
 
 	return 0;
 }
@@ -153,6 +166,9 @@ static void work_func(struct work_struct *work)
 		return;
 	}
 
+	pr_err("%s: called\n", __func__);
+
+	msleep(100);
 	atomic_inc(&tw->index);
 
 	pr_info("%s: (%d)th: start---> ", __func__, atomic_read(&tw->index));
@@ -160,8 +176,8 @@ static void work_func(struct work_struct *work)
 	pr_info("%s: (%d)th: step1. 500ms sleep.\n", __func__, atomic_read(&tw->index));
 	msleep(500);
 
-	pr_info("%s: (%d)th: step2. 50ms delay\n", __func__, atomic_read(&tw->index));
-	mdelay(50);
+	pr_info("%s: (%d)th: step2. 1ms delay\n", __func__, atomic_read(&tw->index));
+	mdelay(1);
 
 	pr_info("%s: (%d)th: step3. 500ms sleep\n", __func__, atomic_read(&tw->index));
 	msleep(500);
@@ -173,19 +189,19 @@ static void __init_wq(void)
 {
 	switch (wq_type) {
 	case TYPE_WQ:
-		pr_info("%s: create_singlethread_workqueue()\n", __func__);
-		tw->wq = create_singlethread_workqueue("test_wq");
-		break;
-	case TYPE_SINGLE_WQ:
 		pr_info("%s: create_workqueue()\n", __func__);
 		tw->wq = create_workqueue("test_single_wq");
+		break;
+	case TYPE_SINGLE_WQ:
+		pr_info("%s: create_singlethread_workqueue()\n", __func__);
+		tw->wq = create_singlethread_workqueue("test_wq");
 		break;
 	default:
 		pr_err("%s:Not yet value\n", __func__);
 		return;
 	}
 
-	INIT_WORK(&tw->w, work_func);
+	//INIT_WORK(&tw->w, work_func);
 }
 
 static void cleanup_wq(struct kref *refcount)
@@ -207,6 +223,7 @@ static int __init init_wq(void)
 	if (!tw)
 		return -ENOMEM;
 
+	tw->type = wq_type;
 	work_debugfs_init(tw);
 	__init_wq();
 	atomic_set(&tw->index, 0);
