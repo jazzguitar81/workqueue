@@ -27,8 +27,12 @@ struct test_work *tw;
 
 enum {
 	TYPE_NONE,
-	TYPE_WQ,	/* create_workqueue() */
-	TYPE_SINGLE_WQ, /* create_singlethread_workqueue() */
+	TYPE_WQ,			/* create_workqueue() */
+	TYPE_SINGLE_WQ,			/* create_singlethread_workqueue() */
+	TYPE_ALLOC_WQ,			/* alloc_workqueue() */
+	TYPE_ALLOC_WQ_MAX,		/* alloc_workqueue() with max_active */
+	TYPE_ALLOC_WQ_UNBOUND,		/* alloc_workqueue() unbound */
+	TYPE_ALLOC_WQ_UNBOUND_MAX,	/* alloc_workqueue() unbound & max_active */
 	TYPE_MAX,
 };
 
@@ -46,10 +50,22 @@ static int type_show(struct seq_file *s, void *unused)
 
 	switch (tw->type) {
 	case TYPE_WQ:
-		seq_puts(s, "type: create_workqueue()");
+		seq_puts(s, "type: create_workqueue()\n");
 		break;
 	case TYPE_SINGLE_WQ:
-		seq_puts(s, "type: create_singlethread_workqueue()");
+		seq_puts(s, "type: create_singlethread_workqueue()\n");
+		break;
+	case TYPE_ALLOC_WQ:
+		seq_puts(s, "type: alloc_workqueue() with single\n");
+		break;
+	case TYPE_ALLOC_WQ_MAX:
+		seq_puts(s, "type: alloc_workqueue() with max_active(256)\n");
+		break;
+	case TYPE_ALLOC_WQ_UNBOUND:
+		seq_puts(s, "type: alloc_workqueue() with unbound\n");
+		break;
+	case TYPE_ALLOC_WQ_UNBOUND_MAX:
+		seq_puts(s, "type: alloc_workqueue() with unbound & max_active\n");
 		break;
 	default:
 		seq_puts(s, "No value");
@@ -85,14 +101,19 @@ static int start_show(struct seq_file *s, void *unused)
 {
 	struct test_work *tw = s->private;
 	int i;
+	bool result;
 
 	pr_info("%s: called\n", __func__);
 
 	/* Let's put the queue_work here for test */
 	for (i = 0; i < 10; i++) {
-		pr_err("%s: Add test_work to the tw's workqueue\n", __func__);
-		queue_work(tw->wq, &tw->w);
-		msleep(10);
+		pr_err("%s: (%d)th: Add test_work to the tw's workqueue\n",
+					__func__, i+1);
+		result = queue_work(tw->wq, &tw->w);
+		if (result == false)
+			pr_err("%s: (%d)th: failed to queue_work\n",
+					__func__, i+1);
+		msleep(20);
 	}
 
 	pr_info("%s: done ---->\n", __func__);
@@ -169,6 +190,26 @@ static void work_func(struct work_struct *work)
 	pr_info("%s: (%d)th: done----> ", __func__, atomic_read(&tw->index));
 }
 
+static void work_func_with_busy(struct work_struct *work)
+{
+	struct test_work *tw;
+
+	tw = container_of(work, struct test_work, w);
+	if (!tw) {
+		pr_err("%s: Null pointer!!\n", __func__);
+		return;
+	}
+
+	atomic_inc(&tw->index);
+
+	pr_info("%s: (%d)th: start---> ", __func__, atomic_read(&tw->index));
+
+	pr_info("%s: (%d)th: step2. 50ms delay\n", __func__, atomic_read(&tw->index));
+	mdelay(50);
+
+	pr_info("%s: (%d)th: done----> ", __func__, atomic_read(&tw->index));
+}
+
 static void __init_wq(void)
 {
 	switch (wq_type) {
@@ -178,14 +219,32 @@ static void __init_wq(void)
 		break;
 	case TYPE_SINGLE_WQ:
 		pr_info("%s: create_workqueue()\n", __func__);
-		tw->wq = create_workqueue("test_single_wq");
+		tw->wq = create_workqueue("test_wq");
+		break;
+	case TYPE_ALLOC_WQ:
+		pr_info("%s: alloc_workqueue() with sigle\n", __func__);
+		tw->wq = alloc_workqueue("test_wq", WQ_HIGHPRI | WQ_CPU_INTENSIVE, 10);
+		break;
+	case TYPE_ALLOC_WQ_MAX:
+		pr_info("%s: alloc_workqueue() with max_active(256)\n", __func__);
+		/* max_active is 0, which means set as 256 for max_active. */
+		tw->wq = alloc_workqueue("test_wq", WQ_HIGHPRI | WQ_CPU_INTENSIVE, 0);
+		break;
+	case TYPE_ALLOC_WQ_UNBOUND:
+		pr_info("%s: alloc_workqueue() with unbound\n", __func__);
+		tw->wq = alloc_workqueue("test_wq", WQ_HIGHPRI | WQ_UNBOUND, 1);
+		break;
+	case TYPE_ALLOC_WQ_UNBOUND_MAX:
+		pr_info("%s: alloc_workqueue() with unbound & max_active(256)\n", __func__);
+		tw->wq = alloc_workqueue("test_wq", WQ_HIGHPRI | WQ_UNBOUND, 0);
 		break;
 	default:
 		pr_err("%s:Not yet value\n", __func__);
 		return;
 	}
 
-	INIT_WORK(&tw->w, work_func);
+	//INIT_WORK(&tw->w, work_func);
+	INIT_WORK(&tw->w, work_func_with_busy);
 }
 
 static void cleanup_wq(struct kref *refcount)

@@ -10,6 +10,7 @@
 #include <linux/moduleparam.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
@@ -17,7 +18,7 @@
 #define DRIVER_DESC	"Work Queue Test Kernel Module"
 
 struct test_work {
-	atomic_t index;
+	int	index;
 	int	type;
 
 	struct kref kref;
@@ -31,6 +32,8 @@ enum {
 	TYPE_NONE,
 	TYPE_WQ,	/* create_workqueue() */
 	TYPE_SINGLE_WQ, /* create_singlethread_workqueue() */
+	TYPE_ALLOC_WQ,	/* alloc_workqueue() */
+	TYPE_ALLOC_WQ_UNBOUND, /* alloc_workqueue() with unbound */
 	TYPE_MAX,
 };
 
@@ -41,19 +44,38 @@ MODULE_PARM_DESC(wq_type, "create work queue type for test purpose");
 
 static void work_func(struct work_struct *work);
 
-static void mytimer_handler(unsigned long data);
-static unsigned long half_sec;
+static void mytimer_handler(struct timer_list *unused);
+static unsigned long timer_delay;
 
-DEFINE_TIMER(mytimer, mytimer_handler, 0, 0);
+DEFINE_TIMER(mytimer, mytimer_handler);
 
-static void mytimer_handler(unsigned long data)
+static int timer_idx;
+static void mytimer_handler(struct timer_list *unused)
 {
-	pr_err("%s: init_work()\n", __func__);
-	INIT_WORK(&tw->w, work_func);
-	pr_err("%s: Add test_work to the tw's workqueue\n", __func__);
-	queue_work(tw->wq, &tw->w);
+	struct test_work *t;
+	bool result;
 
-	mod_timer(&mytimer, jiffies + half_sec);
+	++timer_idx;
+
+	/*
+	 * timer's handler from soft irq. So we need to set GFP_ATOMIC
+	 * not GFP_KERNEL
+	*/
+	t = kmemdup(tw, sizeof(struct test_work), GFP_ATOMIC);
+	if (!t)
+		return;
+
+	INIT_WORK(&t->w, work_func);
+
+	pr_err("%s: (%d)th: Add test_work to the tw's workqueue\n",
+					__func__, timer_idx);
+	result = queue_work(t->wq, &t->w);
+	if (result == false)
+		pr_err("%s: (%d)th: fail to queue_work()\n",
+			__func__, timer_idx);
+
+	if (timer_idx <= 10)
+		mod_timer(&mytimer, jiffies + timer_delay);
 }
 
 /********** debugfs **********/
@@ -65,13 +87,19 @@ static int type_show(struct seq_file *s, void *unused)
 
 	switch (tw->type) {
 	case TYPE_WQ:
-		seq_puts(s, "type: create_workqueue()");
+		seq_puts(s, "type: create_workqueue()\n");
 		break;
 	case TYPE_SINGLE_WQ:
-		seq_puts(s, "type: create_singlethread_workqueue()");
+		seq_puts(s, "type: create_singlethread_workqueue()\n");
+		break;
+	case TYPE_ALLOC_WQ:
+		seq_puts(s, "type: alloc_workqueue()\n");
+		break;
+	case TYPE_ALLOC_WQ_UNBOUND:
+		seq_puts(s, "type: alloc_workqueue() with unbound\n");
 		break;
 	default:
-		seq_puts(s, "No value");
+		seq_puts(s, "No value\n");
 		break;
 	}
 
@@ -100,15 +128,15 @@ static const struct file_operations type_fops = {
 	.release = single_release,
 };
 
+#define DELAY	500	/* unit: msec */
 static int start_show(struct seq_file *s, void *unused)
 {
 	struct test_work *tw = s->private;
-	int i;
 
 	pr_info("%s: called\n", __func__);
 
-	half_sec = msecs_to_jiffies(500 * 1);
-	mod_timer(&mytimer, jiffies + half_sec);
+	timer_delay = msecs_to_jiffies(DELAY * 1);
+	mod_timer(&mytimer, jiffies + timer_delay);
 
 	return 0;
 }
@@ -158,31 +186,22 @@ static void work_debugfs_remove(void)
 
 static void work_func(struct work_struct *work)
 {
-	struct test_work *tw;
-
-	tw = container_of(work, struct test_work, w);
-	if (!tw) {
-		pr_err("%s: Null pointer!!\n", __func__);
-		return;
-	}
-
 	pr_err("%s: called\n", __func__);
 
-	msleep(100);
-	atomic_inc(&tw->index);
+	++tw->index;
 
-	pr_info("%s: (%d)th: start---> ", __func__, atomic_read(&tw->index));
+	pr_info("%s: (%d)th: start---> ", __func__, tw->index);
 
-	pr_info("%s: (%d)th: step1. 500ms sleep.\n", __func__, atomic_read(&tw->index));
+	pr_info("%s: (%d)th: step1. 500ms sleep.\n", __func__, tw->index);
 	msleep(500);
 
-	pr_info("%s: (%d)th: step2. 1ms delay\n", __func__, atomic_read(&tw->index));
-	mdelay(1);
+	pr_info("%s: (%d)th: step2. 10ms delay\n", __func__, tw->index);
+	mdelay(10);
 
-	pr_info("%s: (%d)th: step3. 500ms sleep\n", __func__, atomic_read(&tw->index));
+	pr_info("%s: (%d)th: step3. 500ms sleep\n", __func__, tw->index);
 	msleep(500);
 
-	pr_info("%s: (%d)th: done----> ", __func__, atomic_read(&tw->index));
+	pr_info("%s: (%d)th: done----> ", __func__, tw->index);
 }
 
 static void __init_wq(void)
@@ -196,12 +215,19 @@ static void __init_wq(void)
 		pr_info("%s: create_singlethread_workqueue()\n", __func__);
 		tw->wq = create_singlethread_workqueue("test_wq");
 		break;
+	case TYPE_ALLOC_WQ:
+		pr_info("%s: alloc_workqueue()\n", __func__);
+		tw->wq = alloc_workqueue("test_wq", WQ_HIGHPRI | WQ_CPU_INTENSIVE, 1);
+		break;
+	case TYPE_ALLOC_WQ_UNBOUND:
+		pr_info("%s: alloc_workqueue() with unbound\n", __func__);
+		tw->wq = alloc_workqueue("test_wq",
+				WQ_HIGHPRI | WQ_CPU_INTENSIVE | __WQ_ORDERED | WQ_UNBOUND, 1);
+		break;
 	default:
 		pr_err("%s:Not yet value\n", __func__);
 		return;
 	}
-
-	//INIT_WORK(&tw->w, work_func);
 }
 
 static void cleanup_wq(struct kref *refcount)
@@ -214,6 +240,7 @@ static void cleanup_wq(struct kref *refcount)
 		destroy_workqueue(tw->wq);
 	}
 	work_debugfs_remove();
+	del_timer(&mytimer);
 	kfree(tw);
 }
 
@@ -226,7 +253,6 @@ static int __init init_wq(void)
 	tw->type = wq_type;
 	work_debugfs_init(tw);
 	__init_wq();
-	atomic_set(&tw->index, 0);
 
 	kref_init(&tw->kref);
 

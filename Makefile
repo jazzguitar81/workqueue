@@ -1,4 +1,5 @@
 obj-m += work.o
+obj-m += work-hd.o
 
 KERNELDIR	?= /lib/modules/$(shell uname -r)/build
 PWD		:= $(shell pwd)
